@@ -1,0 +1,136 @@
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Data::Dumper;
+die 'Specify path to the source movie on the command line' unless $ARGV[0];
+
+# general config
+my @ovc_list = qw(xvid);                                          # first is default
+my @oac_list = qw(mp3 copy);                                      # first is default
+my $nice     = '+5';
+my $vo       = 'xv';
+my $lameopts = '-lameopts fast:preset=medium:q=0:mode=1:vol=5';
+my $mplayer  = check_cmd('/usr/bin/mplayer');
+my $mencoder = check_cmd('/usr/bin/mencoder');
+
+# resolve the source movie path
+my $src_movie;
+if ( $ARGV[0] eq '-dvd-device' ) {
+ $src_movie = "$ARGV[0] '$ARGV[1]' $ARGV[2] $ARGV[3] $ARGV[4]";                       # this is for "-dvd=device /dvd/avatar/ dvd://1 -chapter 3"
+} else {
+ $src_movie = "'$ARGV[0]'";
+}
+@ARGV = ();                                                       # reset the STDIN array
+
+# video codec
+my $ovc = ask( 'Which video codec', \@ovc_list, 'xvid' );
+
+# audio track
+print "Getting audio track info...\n";
+my $cmd = "$mplayer $src_movie -frames 1 -identify 2>/dev/null | egrep '(ID_AUDIO|AID)'";
+print $cmd;
+system $cmd;
+print 'Enter audio track ID number: ';
+my $aid = <>;
+chomp $aid;
+my $oac = ask( 'Which audio codec', \@oac_list );
+my ( $oac1, $oac2, $oacopts );
+
+if ( $oac eq 'mp3' ) {
+ $oac1    = 'copy';
+ $oac2    = 'mp3lame';
+ $oacopts = $lameopts;
+} else {
+ $oac1    = 'copy';
+ $oac2    = 'copy';
+ $oacopts = '';
+}
+
+# picture cropping
+print "Trying crop values. Watch some bright scenes and press 'q' to quit.\n";
+$cmd = "$mplayer $src_movie -nosub -noautosub -vf cropdetect -vo $vo 2>/dev/null";
+open CROPDETECT, "$cmd |";
+
+#$/ = "\r";
+my ( $w, $h, $x, $y );
+while (<CROPDETECT>) {
+ if (/crop=(.+):(.+):(.+):(.+)\)/) {
+  ( $w, $h, $x, $y ) = ( $1, $2, $3, $4 );
+ }
+}
+print "Detected crop values: $w:$h:$x:$y\n";
+print "Check the cropping area...\n";
+$cmd = "$mplayer $src_movie -nosub -noautosub -vf rectangle=$w:$h:$x:$y -vo $vo 1>/dev/null 2>/dev/null";
+system $cmd;
+
+#video bitrate
+my $vbitrate = int( ( ( $w * $w ) / 321 ) / 10 ) * 10;
+print "Calculated video bitrate: $vbitrate\n";
+my $answer;
+do {
+ $answer = ask( 'Enter video bitrate', [$vbitrate] );
+} until ( $answer =~ /[0-9]+/ );
+$vbitrate = $answer;
+
+# cartoon
+my $cartoon = ask( 'Is it a cartoon', [qw(y n)] );
+$cartoon = $cartoon eq 'y' ? 'cartoon' : 'nocartoon';
+
+# deint
+my $deint = ask( 'Is the source material interlaced', [ 'n', 'y' ] );
+$deint = $deint eq 'n' ? undef : 'kerndeint';
+
+# video codec (only xvid for now)
+my $ovcopts = "-xvidencopts autoaspect:turbo:quant_type=mpeg:vhq=4:bvhq=1:chroma_opt:$cartoon:bitrate=$vbitrate";
+
+# output file
+print 'Tell me where to store the resulting transcoded movie? ';
+my $out_movie = <>;
+chomp $out_movie;
+
+# vf
+my @vf = ();
+push @vf, "crop=$w:$h:$x:$y";
+push @vf, $deint if defined $deint;
+push @vf, "scale=$w:-10";
+my $vf = join ',', @vf;
+
+# put it all together
+my $pass_common = "nice -n $nice $mencoder $src_movie \\
+-mc 0 -noskip \\
+-passlogfile ${out_movie}.log \\
+-vf $vf \\
+-aid $aid -noautosub -nosub \\
+-ovc $ovc";
+my $pass1 = "$pass_common \\\n-oac $oac1 \\\n$ovcopts:pass=1 \\\n-o /dev/null";
+my $pass2 = "$pass_common \\\n-oac $oac2 $oacopts \\\n$ovcopts:pass=2 \\\n-o $out_movie";
+print "# # # P A S S   1 # # #\n\n$pass1\n\n# # # P A S S   2 # # #\n\n$pass2\n";
+$answer = ask( 'Do you want me to run the job right now?', [qw(y n)] );
+if ( $answer eq 'y' ) {
+ system $pass1 && system $pass2;
+} else {
+ exit;
+}
+
+sub ask {
+ my ( $question, $options_ref, $strict ) = @_;
+ my $answer = undef;
+ do {
+  print "$question [" . join( '|', @{$options_ref} ) . "] (enter=$options_ref->[0])? ";
+  $answer = <>;
+  chomp $answer;
+  $answer = $options_ref->[0] unless $answer;
+ } until (($answer ~~ @{$options_ref}) or !$strict);
+ return $answer;
+}
+
+sub check_cmd {
+ my $cmd    = shift;
+ my $result = `which $cmd`;
+ chomp $result;
+ die "Required command '$cmd' not found" unless $result;
+ return $result;
+}
+
+#TODO let user cancel crop
+#TODO let user use scale
